@@ -793,8 +793,19 @@ void gz::sim::systems::ArduPilotPlugin::LoadImuSensors(
     sdf::ElementPtr _sdf,
     gz::sim::EntityComponentManager &/*_ecm*/)
 {
-    this->dataPtr->imuName =
-        _sdf->Get("imuName", static_cast<std::string>("imu_sensor")).first;
+    this->dataPtr->imuNames = std::vector<std::string> {};
+
+    auto imuName = _sdf->GetElement("imuName");
+
+    while (imuName) {
+        this->dataPtr->imuNames.push_back(imuName->Get<std::string>());
+        imuName = _sdf->GetNextElement("imuName");
+    }
+
+    /* Add the default IMU sensor name if none were provided */
+    if (this->dataPtr->imuNames.empty()) {
+        this->dataPtr->imuNames.push_back("imu_sensor");
+    }
 }
 
 /////////////////////////////////////////////////
