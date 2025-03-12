@@ -29,6 +29,7 @@
 #include <mutex>
 #include <string>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include <gz/common/SignalHandler.hh>
@@ -196,9 +197,6 @@ class gz::sim::systems::ArduPilotPluginPrivate
   /// \brief The model
   public: gz::sim::Model model{gz::sim::kNullEntity};
 
-  /// \brief The entity representing the link containing the imu sensor.
-  public: gz::sim::Entity imuLink{gz::sim::kNullEntity};
-
   /// \brief The model name;
   public: std::string modelName;
 
@@ -235,38 +233,35 @@ class gz::sim::systems::ArduPilotPluginPrivate
   /// \brief The port for the SITL flight controller - auto detected
   public: uint16_t fcu_port_out;
 
-  /// \brief The name of the IMU sensor
-  public: std::string imuName;
-
   /// \brief Set true to enforce lock-step simulation
   public: bool isLockStep{false};
 
   /// \brief Set true if have 32 servo channels
   public: bool have32Channels{false};
 
-  /// \brief Have we initialized subscription to the IMU data yet?
-  public: bool imuInitialized{false};
-
   /// \brief We need an gz-transport Node to subscribe to IMU data
   public: gz::transport::Node node;
 
+
+  // IMU sensors
+
+  /// \brief The name of the IMU sensor
+  public: std::vector<std::string> imuNames;
+
+  /// \brief Have we initialized subscription to the IMU data yet?
+  public: bool imusInitialized{false};
+
+  /// \brief The entity representing the a link containing one of the imu sensors.
+  public: gz::sim::Entity imuLink{gz::sim::kNullEntity};
+
   /// \brief A copy of the most recently received IMU data message
-  public: gz::msgs::IMU imuMsg;
+  public: std::unordered_map<std::string, gz::msgs::IMU> imuMsgs;
 
   /// \brief Have we received at least one IMU data message?
-  public: bool imuMsgValid{false};
+  public: std::unordered_map<std::string, bool> imuMsgsValid;
 
   /// \brief This mutex should be used when accessing imuMsg or imuMsgValid
   public: std::mutex imuMsgMutex;
-
-  /// \brief This subscriber callback latches the most recently received
-  ///        IMU data message for later use.
-  public: void ImuCb(const gz::msgs::IMU &_msg)
-  {
-    std::lock_guard<std::mutex> lock(this->imuMsgMutex);
-    imuMsg = _msg;
-    imuMsgValid = true;
-  }
 
   // Range sensors
 
