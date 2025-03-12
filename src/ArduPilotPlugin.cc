@@ -1697,39 +1697,6 @@ void gz::sim::systems::ArduPilotPlugin::CreateStateJSON(
     double _simTime,
     const gz::sim::EntityComponentManager &_ecm) const
 {
-    // Make a local copy of the latest IMU data (it's filled in
-    // on receipt by ImuCb()).
-    gz::msgs::IMU imuMsg;
-    {
-        std::lock_guard<std::mutex> lock(this->dataPtr->imuMsgMutex);
-        // Wait until we've received a valid message.
-        if (!this->dataPtr->imuMsgValid)
-        {
-            return;
-        }
-        imuMsg = this->dataPtr->imuMsg;
-    }
-
-    // it is assumed that the imu orientation conforms to the
-    // aircraft convention:
-    //   x-forward
-    //   y-right
-    //   z-down
-
-    // get linear acceleration
-    gz::math::Vector3d linearAccel{
-        imuMsg.linear_acceleration().x(),
-        imuMsg.linear_acceleration().y(),
-        imuMsg.linear_acceleration().z()
-    };
-
-    // get angular velocity
-    gz::math::Vector3d angularVel{
-        imuMsg.angular_velocity().x(),
-        imuMsg.angular_velocity().y(),
-        imuMsg.angular_velocity().z(),
-    };
-
     /*
       Gazebo versus ArduPilot frame conventions
       =========================================
@@ -1905,20 +1872,65 @@ void gz::sim::systems::ArduPilotPlugin::CreateStateJSON(
     writer.Double(timestamp);
 
     writer.Key("imu");
-    writer.StartObject();
-    writer.Key("gyro");
-    writer.StartArray();
-    writer.Double(angularVel.X());
-    writer.Double(angularVel.Y());
-    writer.Double(angularVel.Z());
-    writer.EndArray();
-    writer.Key("accel_body");
-    writer.StartArray();
-    writer.Double(linearAccel.X());
-    writer.Double(linearAccel.Y());
-    writer.Double(linearAccel.Z());
-    writer.EndArray();
-    writer.EndObject();
+    writer.StartArray(); // Start IMU array
+
+    for (auto& name : this->dataPtr->imuNames ) {
+        // Make a local copy of the latest IMU data (it's filled in
+        // on receipt by ImuCb()).
+        gz::msgs::IMU imuMsg;
+
+        {
+            std::lock_guard<std::mutex> lock(this->dataPtr->imuMsgMutex);
+            auto iter = this->dataPtr->imuMsgs.find(name);
+
+            // Wait until we've received a valid message.
+            // If no message is in the map, we have not received a message.
+            // Find returns an iterator, so if no element is found then iter will equal end.
+            if (iter == this->dataPtr->imuMsgs.end())
+            {
+                return;
+            }
+
+            imuMsg = iter->second;
+        }
+
+        // it is assumed that the imu orientation conforms to the
+        // aircraft convention:
+        //   x-forward
+        //   y-right
+        //   z-down
+
+        // get linear acceleration
+        gz::math::Vector3d linearAccel{
+            imuMsg.linear_acceleration().x(),
+            imuMsg.linear_acceleration().y(),
+            imuMsg.linear_acceleration().z()
+        };
+
+        // get angular velocity
+        gz::math::Vector3d angularVel{
+            imuMsg.angular_velocity().x(),
+            imuMsg.angular_velocity().y(),
+            imuMsg.angular_velocity().z(),
+        };
+
+        writer.StartObject();  // Start IMU object
+        writer.Key("gyro");
+        writer.StartArray();  // start gyro array
+        writer.Double(angularVel.X());
+        writer.Double(angularVel.Y());
+        writer.Double(angularVel.Z());
+        writer.EndArray();  // end gyro array
+        writer.Key("accel_body");
+        writer.StartArray();  // start acceleration array
+        writer.Double(linearAccel.X());
+        writer.Double(linearAccel.Y());
+        writer.Double(linearAccel.Z());
+        writer.EndArray();  // End acceleration array
+        writer.EndObject();  // End IMU object
+    }
+
+    writer.EndArray();  // end IMU array
 
     writer.Key("position");
     writer.StartArray();
