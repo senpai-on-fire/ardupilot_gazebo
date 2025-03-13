@@ -29,6 +29,7 @@
 #include <mutex>
 #include <string>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include <gz/common/SignalHandler.hh>
@@ -196,9 +197,6 @@ class gz::sim::systems::ArduPilotPluginPrivate
   /// \brief The model
   public: gz::sim::Model model{gz::sim::kNullEntity};
 
-  /// \brief The entity representing the link containing the imu sensor.
-  public: gz::sim::Entity imuLink{gz::sim::kNullEntity};
-
   /// \brief The model name;
   public: std::string modelName;
 
@@ -235,38 +233,35 @@ class gz::sim::systems::ArduPilotPluginPrivate
   /// \brief The port for the SITL flight controller - auto detected
   public: uint16_t fcu_port_out;
 
-  /// \brief The name of the IMU sensor
-  public: std::string imuName;
-
   /// \brief Set true to enforce lock-step simulation
   public: bool isLockStep{false};
 
   /// \brief Set true if have 32 servo channels
   public: bool have32Channels{false};
 
-  /// \brief Have we initialized subscription to the IMU data yet?
-  public: bool imuInitialized{false};
-
   /// \brief We need an gz-transport Node to subscribe to IMU data
   public: gz::transport::Node node;
 
+
+  // IMU sensors
+
+  /// \brief The name of the IMU sensor
+  public: std::vector<std::string> imuNames;
+
+  /// \brief Have we initialized subscription to the IMU data yet?
+  public: bool imusInitialized{false};
+
+  /// \brief The entity representing the a link containing one of the imu sensors.
+  public: gz::sim::Entity imuLink{gz::sim::kNullEntity};
+
   /// \brief A copy of the most recently received IMU data message
-  public: gz::msgs::IMU imuMsg;
+  public: std::unordered_map<std::string, gz::msgs::IMU> imuMsgs;
 
   /// \brief Have we received at least one IMU data message?
-  public: bool imuMsgValid{false};
+  public: std::unordered_map<std::string, bool> imuMsgsValid;
 
   /// \brief This mutex should be used when accessing imuMsg or imuMsgValid
   public: std::mutex imuMsgMutex;
-
-  /// \brief This subscriber callback latches the most recently received
-  ///        IMU data message for later use.
-  public: void ImuCb(const gz::msgs::IMU &_msg)
-  {
-    std::lock_guard<std::mutex> lock(this->imuMsgMutex);
-    imuMsg = _msg;
-    imuMsgValid = true;
-  }
 
   // Range sensors
 
@@ -798,8 +793,19 @@ void gz::sim::systems::ArduPilotPlugin::LoadImuSensors(
     sdf::ElementPtr _sdf,
     gz::sim::EntityComponentManager &/*_ecm*/)
 {
-    this->dataPtr->imuName =
-        _sdf->Get("imuName", static_cast<std::string>("imu_sensor")).first;
+    this->dataPtr->imuNames = std::vector<std::string> {};
+
+    auto imuName = _sdf->GetElement("imuName");
+
+    while (imuName) {
+        this->dataPtr->imuNames.push_back(imuName->Get<std::string>());
+        imuName = imuName->GetNextElement("imuName");
+    }
+
+    /* Add the default IMU sensor name if none were provided */
+    if (this->dataPtr->imuNames.empty()) {
+        this->dataPtr->imuNames.push_back("imu_sensor");
+    }
 }
 
 /////////////////////////////////////////////////
@@ -1000,6 +1006,93 @@ void gz::sim::systems::ArduPilotPlugin::LoadWindSensors(
         _sdf->Get("anemometer", static_cast<std::string>("")).first;
 }
 
+void InitializeIMU(
+    const std::string &imuName,
+    gz::sim::EntityComponentManager &ecm,
+    gz::sim::systems::ArduPilotPluginPrivate *dataPtr)
+{
+    std::string imuTopicName;
+
+    // The model must contain an imu sensor element:
+    //  <sensor name="..." type="imu">
+    //
+    // Extract the following:
+    //  - Sensor topic name: to subscribe to the imu data
+    //  - Link containing the sensor: to get the pose to transform to
+    //    the correct frame for ArduPilot
+
+    // try scoped names first
+    auto entities = entitiesFromScopedName(imuName, ecm, dataPtr->model.Entity());
+
+    // fall-back to unscoped name
+    if (entities.empty())
+    {
+      entities = EntitiesFromUnscopedName(imuName, ecm, dataPtr->model.Entity());
+    }
+
+    if (!entities.empty())
+    {
+      if (entities.size() > 1)
+      {
+        gzwarn << "Multiple IMU sensors with name ["
+               << imuName << "] found. "
+               << "Using the first one.\n";
+      }
+
+      // select first entity
+      gz::sim::Entity imuEntity = *entities.begin();
+
+      // validate
+      if (!ecm.EntityHasComponentType(imuEntity,
+          gz::sim::components::Imu::typeId))
+      {
+        gzerr << "Entity with name [" << imuName << "] is not an IMU sensor\n";
+      }
+      else
+      {
+        gzmsg << "Found IMU sensor with name ["
+              << imuName
+              << "]\n";
+
+        // verify the parent of the imu sensor is a link.
+        gz::sim::Entity parent = ecm.ParentEntity(imuEntity);
+
+        if (ecm.EntityHasComponentType(parent, gz::sim::components::Link::typeId))
+        {
+            // We just need one imu link to compute the JSON message, so we keep
+            // over-writing it
+            dataPtr->imuLink = parent;
+
+            imuTopicName = gz::sim::scopedName(
+                imuEntity, ecm) + "/imu";
+
+            gzdbg << "Computed IMU topic to be: "
+                << imuTopicName << std::endl;
+        }
+        else
+        {
+          gzerr << "Parent of IMU sensor [" << imuName << "] is not a link\n";
+        }
+      }
+    }
+    else
+    {
+        gzerr << "[" << dataPtr->modelName << "] "
+              << "imu_sensor [" << imuName
+              << "] not found, abort ArduPilot plugin." << "\n";
+        return;
+    }
+
+    auto cb = [dataPtr, imuName](const gz::msgs::IMU &msg)
+    {
+        auto lock = std::lock_guard(dataPtr->imuMsgMutex);
+        dataPtr->imuMsgs.insert_or_assign(imuName, msg);
+        dataPtr->imuMsgsValid.insert_or_assign(imuName, true);
+    };
+
+    dataPtr->node.Subscribe<gz::msgs::IMU>(imuTopicName, cb);
+}
+
 /////////////////////////////////////////////////
 void gz::sim::systems::ArduPilotPlugin::PreUpdate(
     const gz::sim::UpdateInfo &_info,
@@ -1094,96 +1187,19 @@ void gz::sim::systems::ArduPilotPlugin::PreUpdate(
 
     // This lookup is done in PreUpdate() because in Configure()
     // it's not possible to get the fully qualified topic name we want
-    if (!this->dataPtr->imuInitialized)
+    if (!this->dataPtr->imusInitialized)
     {
         // Set unconditionally because we're only going to try this once.
-        this->dataPtr->imuInitialized = true;
-        std::string imuTopicName;
+        this->dataPtr->imusInitialized = true;
 
-        // The model must contain an imu sensor element:
-        //  <sensor name="..." type="imu">
-        //
-        // Extract the following:
-        //  - Sensor topic name: to subscribe to the imu data
-        //  - Link containing the sensor: to get the pose to transform to
-        //    the correct frame for ArduPilot
-
-        // try scoped names first
-        auto entities = entitiesFromScopedName(
-            this->dataPtr->imuName, _ecm, this->dataPtr->model.Entity());
-
-        // fall-back to unscoped name
-        if (entities.empty())
-        {
-          entities = EntitiesFromUnscopedName(
-            this->dataPtr->imuName, _ecm, this->dataPtr->model.Entity());
+        for (auto &name : this->dataPtr->imuNames) {
+            InitializeIMU(name, _ecm, this->dataPtr.get());
         }
-
-        if (!entities.empty())
-        {
-          if (entities.size() > 1)
-          {
-            gzwarn << "Multiple IMU sensors with name ["
-                   << this->dataPtr->imuName << "] found. "
-                   << "Using the first one.\n";
-          }
-
-          // select first entity
-          gz::sim::Entity imuEntity = *entities.begin();
-
-          // validate
-          if (!_ecm.EntityHasComponentType(imuEntity,
-              gz::sim::components::Imu::typeId))
-          {
-            gzerr << "Entity with name ["
-                  << this->dataPtr->imuName
-                  << "] is not an IMU sensor\n";
-          }
-          else
-          {
-            gzmsg << "Found IMU sensor with name ["
-                  << this->dataPtr->imuName
-                  << "]\n";
-
-            // verify the parent of the imu sensor is a link.
-            gz::sim::Entity parent = _ecm.ParentEntity(imuEntity);
-            if (_ecm.EntityHasComponentType(parent,
-                gz::sim::components::Link::typeId))
-            {
-                this->dataPtr->imuLink = parent;
-
-                imuTopicName = gz::sim::scopedName(
-                    imuEntity, _ecm) + "/imu";
-
-                gzdbg << "Computed IMU topic to be: "
-                    << imuTopicName << std::endl;
-            }
-            else
-            {
-              gzerr << "Parent of IMU sensor ["
-                    << this->dataPtr->imuName
-                    << "] is not a link\n";
-            }
-          }
-        }
-        else
-        {
-            gzerr << "[" << this->dataPtr->modelName << "] "
-                  << "imu_sensor [" << this->dataPtr->imuName
-                  << "] not found, abort ArduPilot plugin." << "\n";
-            return;
-        }
-
-        this->dataPtr->node.Subscribe(imuTopicName,
-            &gz::sim::systems::ArduPilotPluginPrivate::ImuCb,
-            this->dataPtr.get());
 
         // Make sure that the 'imuLink' entity has WorldPose
         // and WorldLinearVelocity components, which we'll need later.
-        enableComponent<components::WorldPose>(
-            _ecm, this->dataPtr->imuLink, true);
-        enableComponent<components::WorldLinearVelocity>(
-            _ecm, this->dataPtr->imuLink, true);
+        enableComponent<components::WorldPose>(_ecm, this->dataPtr->imuLink, true);
+        enableComponent<components::WorldLinearVelocity>(_ecm, this->dataPtr->imuLink, true);
     }
     else
     {
@@ -1681,39 +1697,6 @@ void gz::sim::systems::ArduPilotPlugin::CreateStateJSON(
     double _simTime,
     const gz::sim::EntityComponentManager &_ecm) const
 {
-    // Make a local copy of the latest IMU data (it's filled in
-    // on receipt by ImuCb()).
-    gz::msgs::IMU imuMsg;
-    {
-        std::lock_guard<std::mutex> lock(this->dataPtr->imuMsgMutex);
-        // Wait until we've received a valid message.
-        if (!this->dataPtr->imuMsgValid)
-        {
-            return;
-        }
-        imuMsg = this->dataPtr->imuMsg;
-    }
-
-    // it is assumed that the imu orientation conforms to the
-    // aircraft convention:
-    //   x-forward
-    //   y-right
-    //   z-down
-
-    // get linear acceleration
-    gz::math::Vector3d linearAccel{
-        imuMsg.linear_acceleration().x(),
-        imuMsg.linear_acceleration().y(),
-        imuMsg.linear_acceleration().z()
-    };
-
-    // get angular velocity
-    gz::math::Vector3d angularVel{
-        imuMsg.angular_velocity().x(),
-        imuMsg.angular_velocity().y(),
-        imuMsg.angular_velocity().z(),
-    };
-
     /*
       Gazebo versus ArduPilot frame conventions
       =========================================
@@ -1889,20 +1872,72 @@ void gz::sim::systems::ArduPilotPlugin::CreateStateJSON(
     writer.Double(timestamp);
 
     writer.Key("imu");
-    writer.StartObject();
-    writer.Key("gyro");
-    writer.StartArray();
-    writer.Double(angularVel.X());
-    writer.Double(angularVel.Y());
-    writer.Double(angularVel.Z());
-    writer.EndArray();
-    writer.Key("accel_body");
-    writer.StartArray();
-    writer.Double(linearAccel.X());
-    writer.Double(linearAccel.Y());
-    writer.Double(linearAccel.Z());
-    writer.EndArray();
-    writer.EndObject();
+    writer.StartObject(); // Start IMU object
+
+    int imuNumber = 1;  // Start sensor indexing from 1
+
+    for (auto& name : this->dataPtr->imuNames) {
+        // Make a local copy of the latest IMU data (it's filled in
+        // on receipt by ImuCb()).
+        gz::msgs::IMU imuMsg;
+
+        {
+            std::lock_guard<std::mutex> lock(this->dataPtr->imuMsgMutex);
+            auto iter = this->dataPtr->imuMsgs.find(name);
+
+            // Wait until we've received a valid message.
+            // If no message is in the map, we have not received a message.
+            // Find returns an iterator, so if no element is found then iter will equal end.
+            if (iter == this->dataPtr->imuMsgs.end())
+            {
+                return;
+            }
+
+            imuMsg = iter->second;
+        }
+
+        // it is assumed that the imu orientation conforms to the
+        // aircraft convention:
+        //   x-forward
+        //   y-right
+        //   z-down
+
+        // get linear acceleration
+        gz::math::Vector3d linearAccel{
+            imuMsg.linear_acceleration().x(),
+            imuMsg.linear_acceleration().y(),
+            imuMsg.linear_acceleration().z()
+        };
+
+        // get angular velocity
+        gz::math::Vector3d angularVel{
+            imuMsg.angular_velocity().x(),
+            imuMsg.angular_velocity().y(),
+            imuMsg.angular_velocity().z(),
+        };
+
+        auto suffix = std::to_string(imuNumber);
+        auto gyroKey = std::string { "gyro" } + suffix;
+        auto accelBodyKey = std::string { "accel_body" } + suffix;
+
+        writer.Key(gyroKey.c_str());
+        writer.StartArray();  // start gyro array
+        writer.Double(angularVel.X());
+        writer.Double(angularVel.Y());
+        writer.Double(angularVel.Z());
+        writer.EndArray();  // end gyro array
+
+        writer.Key(accelBodyKey.c_str());
+        writer.StartArray();  // start acceleration array
+        writer.Double(linearAccel.X());
+        writer.Double(linearAccel.Y());
+        writer.Double(linearAccel.Z());
+        writer.EndArray();  // End acceleration array
+
+        ++imuNumber;
+    }
+
+    writer.EndObject();  // end IMU array
 
     writer.Key("position");
     writer.StartArray();
