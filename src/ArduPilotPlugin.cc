@@ -799,7 +799,7 @@ void gz::sim::systems::ArduPilotPlugin::LoadImuSensors(
 
     while (imuName) {
         this->dataPtr->imuNames.push_back(imuName->Get<std::string>());
-        imuName = _sdf->GetNextElement("imuName");
+        imuName = imuName->GetNextElement("imuName");
     }
 
     /* Add the default IMU sensor name if none were provided */
