@@ -1872,9 +1872,11 @@ void gz::sim::systems::ArduPilotPlugin::CreateStateJSON(
     writer.Double(timestamp);
 
     writer.Key("imu");
-    writer.StartArray(); // Start IMU array
+    writer.StartObject(); // Start IMU object
 
-    for (auto& name : this->dataPtr->imuNames ) {
+    int imuNumber = 0;
+
+    for (auto& name : this->dataPtr->imuNames) {
         // Make a local copy of the latest IMU data (it's filled in
         // on receipt by ImuCb()).
         gz::msgs::IMU imuMsg;
@@ -1914,23 +1916,28 @@ void gz::sim::systems::ArduPilotPlugin::CreateStateJSON(
             imuMsg.angular_velocity().z(),
         };
 
-        writer.StartObject();  // Start IMU object
-        writer.Key("gyro");
+        auto suffix = std::to_string(imuNumber);
+        auto gyroKey = std::string { "gyro" } + suffix;
+        auto accelBodyKey = std::string { "accel_body" } + suffix;
+
+        writer.Key(gyroKey.c_str());
         writer.StartArray();  // start gyro array
         writer.Double(angularVel.X());
         writer.Double(angularVel.Y());
         writer.Double(angularVel.Z());
         writer.EndArray();  // end gyro array
-        writer.Key("accel_body");
+
+        writer.Key(accelBodyKey.c_str());
         writer.StartArray();  // start acceleration array
         writer.Double(linearAccel.X());
         writer.Double(linearAccel.Y());
         writer.Double(linearAccel.Z());
         writer.EndArray();  // End acceleration array
-        writer.EndObject();  // End IMU object
+
+        ++imuNumber;
     }
 
-    writer.EndArray();  // end IMU array
+    writer.EndObject();  // end IMU array
 
     writer.Key("position");
     writer.StartArray();
