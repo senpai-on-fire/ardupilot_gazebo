@@ -1874,7 +1874,7 @@ void gz::sim::systems::ArduPilotPlugin::CreateStateJSON(
     writer.Key("imu");
     writer.StartObject(); // Start IMU object
 
-    int imuNumber = 0;
+    int imuNumber = 1;  // Start sensor indexing from 1
 
     for (auto& name : this->dataPtr->imuNames) {
         // Make a local copy of the latest IMU data (it's filled in
